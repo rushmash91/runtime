@@ -61,6 +61,10 @@ const (
 	// resource if it doesn't exist, or adopt the resource if it exists.
 	// value comes from getAdoptionPolicy
 	// adoptOrCreate = "adopt-or-create"
+
+	// gracefulShutdownTimeout is the maximum time to allow for completing
+	// critical resource operations during shutdown to prevent inconsistency
+	gracefulShutdownTimeout = 30 * time.Second
 )
 
 // reconciler describes a generic reconciler within ACK.
@@ -634,15 +638,28 @@ func (r *resourceReconciler) createResource(
 		}
 	}
 
+	// Create a graceful completion context for the entire resource creation flow
+	// to ensure consistency even during controller shutdown
+	creationCtx := ctx
+	if errors.Is(ctx.Err(), context.Canceled) {
+		// Original context is cancelled (e.g., during controller shutdown),
+		// create a new context with timeout to allow completion of the entire creation flow
+		var cancel context.CancelFunc
+		creationCtx, cancel = context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		defer cancel()
+		rlog.Info("context cancelled during creation, using graceful completion timeout",
+			"timeout", gracefulShutdownTimeout)
+	}
+
 	rlog.Enter("rm.Create")
-	latest, err = rm.Create(ctx, desired)
+	latest, err = rm.Create(creationCtx, desired)
 	rlog.Exit("rm.Create", err)
 	if err != nil {
 		return latest, err
 	}
 
 	rlog.Enter("rm.ReadOne")
-	observed, err := rm.ReadOne(ctx, latest)
+	observed, err := rm.ReadOne(creationCtx, latest)
 	rlog.Exit("rm.ReadOne", err)
 	if err != nil {
 		if err == ackerr.NotFound {
@@ -652,7 +669,7 @@ func (r *resourceReconciler) createResource(
 			// we retry the ReadOne operation with a backoff
 			// until we get the expected 200 from the ReadOne.
 			rlog.Enter("rm.delayedReadOneAfterCreate")
-			observed, err = r.delayedReadOneAfterCreate(ctx, rm, latest)
+			observed, err = r.delayedReadOneAfterCreate(creationCtx, rm, latest)
 			rlog.Exit("rm.delayedReadOneAfterCreate", err)
 			if err != nil {
 				return latest, err
@@ -668,7 +685,7 @@ func (r *resourceReconciler) createResource(
 	// Ensure that we are patching any changes to the annotations/metadata and
 	// the Spec that may have been set by the resource manager's successful
 	// Create call above.
-	latest, err = r.patchResourceMetadataAndSpec(ctx, rm, desired, latest)
+	latest, err = r.patchResourceMetadataAndSpec(creationCtx, rm, desired, latest)
 	if err != nil {
 		return latest, err
 	}
