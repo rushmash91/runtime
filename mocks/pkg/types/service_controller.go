@@ -46,6 +46,26 @@ func (_m *ServiceController) BindControllerManager(_a0 manager.Manager, _a1 conf
 	return r0
 }
 
+// GetEventClient provides a mock function with no fields
+func (_m *ServiceController) GetEventClient() interface{} {
+	ret := _m.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetEventClient")
+	}
+
+	var r0 interface{}
+	if rf, ok := ret.Get(0).(func() interface{}); ok {
+		r0 = rf()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(interface{})
+		}
+	}
+
+	return r0
+}
+
 // GetMetadata provides a mock function with no fields
 func (_m *ServiceController) GetMetadata() types.ServiceControllerMetadata {
 	ret := _m.Called()

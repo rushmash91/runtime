@@ -33,6 +33,7 @@ import (
 	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
 	ackcfg "github.com/aws-controllers-k8s/runtime/pkg/config"
 	ackerr "github.com/aws-controllers-k8s/runtime/pkg/errors"
+	ackevents "github.com/aws-controllers-k8s/runtime/pkg/events"
 	"github.com/aws-controllers-k8s/runtime/pkg/featuregate"
 	ackmetrics "github.com/aws-controllers-k8s/runtime/pkg/metrics"
 	"github.com/aws-controllers-k8s/runtime/pkg/requeue"
@@ -181,6 +182,18 @@ func (r *adoptionReconciler) Sync(
 	rm acktypes.AWSResourceManager,
 	desired *ackv1alpha1.AdoptedResource,
 ) error {
+	// Emit event for resource adoption initiation
+	if r.events != nil {
+		err := r.events.EmitNormalEventForObject(
+			ctx, desired,
+			ackevents.EventReasonResourceAdopting,
+			ackevents.FormatMessage(ackevents.StandardMessages.ResourceAdopting),
+		)
+		if err != nil {
+			ackrtlog.FromContext(ctx).Debug("failed to emit resource adopting event", "error", err)
+		}
+	}
+
 	// Create empty resource with spec/status fields set for ReadOne
 	readableResource := targetDescriptor.ResourceFromRuntimeObject(targetDescriptor.EmptyRuntimeObject())
 	if err := readableResource.SetIdentifiers(desired.Spec.AWS); err != nil {
@@ -337,6 +350,18 @@ func (r *adoptionReconciler) onSuccess(
 	ctx context.Context,
 	res *ackv1alpha1.AdoptedResource,
 ) error {
+	// Emit event for successful resource adoption
+	if r.events != nil {
+		err := r.events.EmitNormalEventForObject(
+			ctx, res,
+			ackevents.EventReasonResourceAdopted,
+			ackevents.FormatMessage(ackevents.StandardMessages.ResourceAdopted),
+		)
+		if err != nil {
+			ackrtlog.FromContext(ctx).Debug("failed to emit resource adopted event", "error", err)
+		}
+	}
+
 	return r.patchAdoptedCondition(ctx, res, nil)
 }
 

@@ -89,4 +89,7 @@ type ServiceController interface {
 
 	// GetMetadata returns the metadata associated with the service controller.
 	GetMetadata() ServiceControllerMetadata
+	// GetEventClient returns the event client for Kubernetes event emission.
+	// Returns interface{} to avoid import cycle - should be cast to *events.EventClient
+	GetEventClient() interface{}
 }

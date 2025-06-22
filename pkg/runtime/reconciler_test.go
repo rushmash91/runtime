@@ -116,6 +116,7 @@ func reconcilerMocks(
 	sc := &ackmocks.ServiceController{}
 	scmd := acktypes.ServiceControllerMetadata{}
 	sc.On("GetMetadata").Return(scmd)
+	sc.On("GetEventClient").Return(nil) // Return nil for tests to avoid event emission
 	kc := &ctrlrtclientmock.Client{}
 
 	return ackrt.NewReconcilerWithClient(
@@ -1627,6 +1628,7 @@ func TestReconcilerUpdate_EnsureControllerTagsError(t *testing.T) {
 	rm.AssertNotCalled(t, "Update", ctx, desired, latest, delta)
 	// No changes to metadata or spec so Patch on the object shouldn't be done
 	kc.AssertNotCalled(t, "Patch", withoutCancelContextMatcher, latestRTObj, mock.AnythingOfType("*client.mergeFromPatch"))
+
 	// Only the HandleReconcilerError wrapper function ever calls patchResourceStatus
 	kc.AssertNotCalled(t, "Status")
 	rm.AssertNotCalled(t, "LateInitialize", ctx, latest)

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
@@ -31,6 +32,7 @@ import (
 
 	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
 	ackcfg "github.com/aws-controllers-k8s/runtime/pkg/config"
+	ackevents "github.com/aws-controllers-k8s/runtime/pkg/events"
 	ackmetrics "github.com/aws-controllers-k8s/runtime/pkg/metrics"
 	ackrtcache "github.com/aws-controllers-k8s/runtime/pkg/runtime/cache"
 	acktypes "github.com/aws-controllers-k8s/runtime/pkg/types"
@@ -78,6 +80,8 @@ type serviceController struct {
 	// metrics contains a collection of Prometheus metric objects that the
 	// service controller and its reconcilers track
 	metrics *ackmetrics.Metrics
+	// eventClient handles Kubernetes event emission for the service controller
+	eventClient *ackevents.EventClient
 }
 
 // GetReconcilers returns a slice of types.AWSResourceReconcilers associated
@@ -220,6 +224,13 @@ func (c *serviceController) BindControllerManager(mgr ctrlrt.Manager, cfg ackcfg
 		}},
 		cfg.FeatureGates,
 	)
+	// Initialize Kubernetes client for events and cache operations
+	clusterConfig := mgr.GetConfig()
+	clientSet, err := kubernetes.NewForConfig(clusterConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create Kubernetes client: %v", err)
+	}
+
 	// We want to run the caches if the length of the namespaces slice is
 	// either 0 (watching all namespaces) or greater than 1 (watching multiple
 	// namespaces).
@@ -228,11 +239,6 @@ func (c *serviceController) BindControllerManager(mgr ctrlrt.Manager, cfg ackcfg
 	// controller is not configured to watch multiple namespaces, then we don't
 	// need to run the caches.
 	if len(namespaces) == 0 || len(namespaces) >= 2 {
-		clusterConfig := mgr.GetConfig()
-		clientSet, err := kubernetes.NewForConfig(clusterConfig)
-		if err != nil {
-			return err
-		}
 		// Run the caches. This will not block as the caches are run in
 		// separate goroutines.
 		cache.Run(clientSet)
@@ -241,6 +247,12 @@ func (c *serviceController) BindControllerManager(mgr ctrlrt.Manager, cfg ackcfg
 		synced := cache.WaitForCachesToSync(ctx)
 		c.log.Info("Waited for the caches to sync", "synced", synced)
 	}
+
+	// Initialize event client for Kubernetes event emission
+	eventRecorder := mgr.GetEventRecorderFor(c.ServiceAlias + "-controller")
+	controllerName := c.ServiceAlias + ".controllers.aws"
+	instanceID := fmt.Sprintf("instance-%d", time.Now().Unix()) // Generate unique instance ID
+	c.eventClient = ackevents.NewEventClient(clientSet, eventRecorder, controllerName, instanceID)
 
 	if cfg.EnableAdoptedResourceReconciler {
 		adoptionInstalled, err := c.GetAdoptedResourceInstalled(mgr)
@@ -321,6 +333,11 @@ func (c *serviceController) BindControllerManager(mgr ctrlrt.Manager, cfg ackcfg
 // GetMetadata returns the metadata associated with the service controller.
 func (c *serviceController) GetMetadata() acktypes.ServiceControllerMetadata {
 	return c.ServiceControllerMetadata
+}
+
+// GetEventClient returns the event client for Kubernetes event emission.
+func (c *serviceController) GetEventClient() interface{} {
+	return c.eventClient
 }
 
 // NewServiceController returns a new serviceController instance

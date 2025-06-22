@@ -39,6 +39,7 @@ import (
 	ackcondition "github.com/aws-controllers-k8s/runtime/pkg/condition"
 	ackcfg "github.com/aws-controllers-k8s/runtime/pkg/config"
 	ackerr "github.com/aws-controllers-k8s/runtime/pkg/errors"
+	ackevents "github.com/aws-controllers-k8s/runtime/pkg/events"
 	"github.com/aws-controllers-k8s/runtime/pkg/featuregate"
 	ackmetrics "github.com/aws-controllers-k8s/runtime/pkg/metrics"
 	"github.com/aws-controllers-k8s/runtime/pkg/requeue"
@@ -68,6 +69,7 @@ type reconciler struct {
 	cfg       ackcfg.Config
 	cache     ackrtcache.Caches
 	metrics   *ackmetrics.Metrics
+	events    *ackevents.EventClient
 }
 
 // resourceReconciler is responsible for reconciling the state of a SINGLE KIND of
@@ -578,7 +580,26 @@ func (r *resourceReconciler) ensureConditions(
 				condMessage = ackcondition.UnknownSyncedMessage
 			}
 		}
+		
+		// Check if the condition state is changing to emit appropriate events
+		previousCondition := ackcondition.Synced(res)
 		ackcondition.SetSynced(res, condStatus, &condMessage, &condReason)
+		
+		// Emit events for state transitions
+		if r.events != nil {
+			// Check if synced condition changed from false/unknown to true
+			if condStatus == corev1.ConditionTrue &&
+				(previousCondition == nil || previousCondition.Status != corev1.ConditionTrue) {
+				err = r.events.EmitNormalEvent(
+					ctx, res,
+					ackevents.EventReasonResourceSynced,
+					ackevents.FormatMessage(ackevents.StandardMessages.ResourceSynced),
+				)
+				if err != nil {
+					rlog.Debug("failed to emit resource synced event", "error", err)
+				}
+			}
+		}
 	}
 }
 
@@ -630,6 +651,18 @@ func (r *resourceReconciler) createResource(
 		}
 	}
 
+	// Emit event for resource creation initiation
+	if r.events != nil {
+		err = r.events.EmitNormalEvent(
+			ctx, desired,
+			ackevents.EventReasonResourceCreating,
+			ackevents.FormatMessage(ackevents.StandardMessages.ResourceCreating),
+		)
+		if err != nil {
+			rlog.Debug("failed to emit resource creating event", "error", err)
+		}
+	}
+
 	rlog.Enter("rm.Create")
 	latest, err = rm.Create(ctx, desired)
 	rlog.Exit("rm.Create", err)
@@ -669,6 +702,18 @@ func (r *resourceReconciler) createResource(
 		return latest, err
 	}
 	rlog.Info("created new resource")
+
+	// Emit event for successful resource creation
+	if r.events != nil {
+		err = r.events.EmitNormalEvent(
+			ctx, latest,
+			ackevents.EventReasonResourceCreated,
+			ackevents.FormatMessage(ackevents.StandardMessages.ResourceCreated),
+		)
+		if err != nil {
+			rlog.Debug("failed to emit resource created event", "error", err)
+		}
+	}
 
 	return latest, nil
 }
@@ -749,6 +794,19 @@ func (r *resourceReconciler) updateResource(
 			"desired resource state has changed",
 			"diff", delta.Differences,
 		)
+		
+		// Emit event for resource update initiation
+		if r.events != nil {
+			err = r.events.EmitNormalEvent(
+				ctx, desired,
+				ackevents.EventReasonResourceUpdating,
+				ackevents.FormatMessage(ackevents.StandardMessages.ResourceUpdating),
+			)
+			if err != nil {
+				rlog.Debug("failed to emit resource updating event", "error", err)
+			}
+		}
+		
 		rlog.Enter("rm.Update")
 		latest, err = rm.Update(ctx, desired, latest, delta)
 		rlog.Exit("rm.Update", err, "latest", latest)
@@ -763,6 +821,18 @@ func (r *resourceReconciler) updateResource(
 			return latest, err
 		}
 		rlog.Info("updated resource")
+		
+		// Emit event for successful resource update
+		if r.events != nil {
+			err = r.events.EmitNormalEvent(
+				ctx, latest,
+				ackevents.EventReasonResourceUpdated,
+				ackevents.FormatMessage(ackevents.StandardMessages.ResourceUpdated),
+			)
+			if err != nil {
+				rlog.Debug("failed to emit resource updated event", "error", err)
+			}
+		}
 	}
 	return latest, nil
 }
@@ -951,6 +1021,18 @@ func (r *resourceReconciler) deleteResource(
 		exit(err)
 	}()
 
+	// Emit event for resource deletion initiation
+	if r.events != nil {
+		err = r.events.EmitNormalEvent(
+			ctx, current,
+			ackevents.EventReasonResourceDeleting,
+			ackevents.FormatMessage(ackevents.StandardMessages.ResourceDeleting),
+		)
+		if err != nil {
+			rlog.Debug("failed to emit resource deleting event", "error", err)
+		}
+	}
+
 	rlog.Enter("rm.ReadOne")
 	observed, err := rm.ReadOne(ctx, current)
 	rlog.Exit("rm.ReadOne", err)
@@ -991,6 +1073,22 @@ func (r *resourceReconciler) deleteResource(
 	}
 	if err == nil {
 		rlog.Info("deleted resource")
+		
+		// Emit event for successful resource deletion
+		if r.events != nil {
+			targetResource := latest
+			if targetResource == nil {
+				targetResource = current
+			}
+			err = r.events.EmitNormalEvent(
+				ctx, targetResource,
+				ackevents.EventReasonResourceDeleted,
+				ackevents.FormatMessage(ackevents.StandardMessages.ResourceDeleted),
+			)
+			if err != nil {
+				rlog.Debug("failed to emit resource deleted event", "error", err)
+			}
+		}
 	}
 
 	return latest, err
@@ -1154,6 +1252,34 @@ func (r *resourceReconciler) HandleReconcileError(
 		return ctrlrt.Result{}, nil
 	}
 	rlog := ackrtlog.FromContext(ctx)
+
+	// Emit warning event for reconcile errors
+	if r.events != nil {
+		targetResource := latest
+		if targetResource == nil {
+			targetResource = desired
+		}
+		
+		eventReason := ackevents.EventReasonReconcileError
+		eventMessage := ackevents.FormatMessage(ackevents.StandardMessages.ReconcileError, err.Error())
+		
+		// Classify error types for more specific events
+		if ackerr.HTTPStatusCode(err) == 403 {
+			eventReason = ackevents.EventReasonPermissionError
+			eventMessage = ackevents.FormatMessage(ackevents.StandardMessages.PermissionError, err.Error())
+		} else if ackerr.HTTPStatusCode(err) == 429 {
+			eventReason = ackevents.EventReasonThrottlingError
+			eventMessage = ackevents.FormatMessage(ackevents.StandardMessages.ThrottlingError, err.Error())
+		} else if ackerr.HTTPStatusCode(err) >= 400 && ackerr.HTTPStatusCode(err) < 500 {
+			eventReason = ackevents.EventReasonValidationError
+			eventMessage = ackevents.FormatMessage(ackevents.StandardMessages.ValidationError, err.Error())
+		}
+		
+		err = r.events.EmitWarningEvent(ctx, targetResource, eventReason, eventMessage)
+		if err != nil {
+			rlog.Debug("failed to emit reconcile error event", "error", err)
+		}
+	}
 
 	var requeueNeededAfter *requeue.RequeueNeededAfter
 	if errors.As(err, &requeueNeededAfter) {
@@ -1425,6 +1551,11 @@ func NewReconcilerWithClient(
 		"reconciler kind", rmf.ResourceDescriptor().GroupVersionKind().Kind,
 		"resync period seconds", resyncPeriod.Seconds(),
 	)
+	var eventClient *ackevents.EventClient
+	if ec := sc.GetEventClient(); ec != nil {
+		eventClient = ec.(*ackevents.EventClient)
+	}
+	
 	return &resourceReconciler{
 		reconciler: reconciler{
 			sc:      sc,
@@ -1433,6 +1564,7 @@ func NewReconcilerWithClient(
 			cfg:     cfg,
 			metrics: metrics,
 			cache:   cache,
+			events:  eventClient,
 		},
 		rmf:          rmf,
 		rd:           rmf.ResourceDescriptor(),

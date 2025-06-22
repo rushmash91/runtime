@@ -79,6 +79,7 @@ func mockFieldExportReconcilerWithResourceDescriptor(rd *mocks.AWSResourceDescri
 	rmFactoryMap := make(map[string]acktypes.AWSResourceManagerFactory)
 	rmFactoryMap["services.k8s.aws"] = &rmfactory
 	sc.On("GetResourceManagerFactories").Return(rmFactoryMap)
+	sc.On("GetEventClient").Return(nil) // Return nil for tests to avoid event emission
 	kc := &ctrlrtclientmock.Client{}
 	apiReader := &ctrlrtclientmock.Reader{}
 	return ackrt.NewFieldExportReconcilerWithClient(

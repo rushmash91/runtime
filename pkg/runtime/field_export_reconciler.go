@@ -35,6 +35,7 @@ import (
 	ackcondition "github.com/aws-controllers-k8s/runtime/pkg/condition"
 	ackcfg "github.com/aws-controllers-k8s/runtime/pkg/config"
 	ackerr "github.com/aws-controllers-k8s/runtime/pkg/errors"
+	ackevents "github.com/aws-controllers-k8s/runtime/pkg/events"
 	ackmetrics "github.com/aws-controllers-k8s/runtime/pkg/metrics"
 	"github.com/aws-controllers-k8s/runtime/pkg/requeue"
 	ackrtcache "github.com/aws-controllers-k8s/runtime/pkg/runtime/cache"
@@ -145,6 +146,18 @@ func (r *fieldExportReconciler) Sync(
 	rlog := ackrtlog.FromContext(ctx)
 	exit := rlog.Trace("r.Sync")
 	defer exit(err)
+
+	// Emit event for field export operation start
+	if r.events != nil {
+		err = r.events.EmitNormalEventForObject(
+			ctx, &desired,
+			ackevents.EventReasonFieldExportStarted,
+			ackevents.FormatMessage(ackevents.StandardMessages.FieldExportStarted),
+		)
+		if err != nil {
+			rlog.Debug("failed to emit field export started event", "error", err)
+		}
+	}
 
 	latest := desired.DeepCopy()
 
@@ -419,6 +432,18 @@ func (r *fieldExportReconciler) onError(
 	res *ackv1alpha1.FieldExport,
 	err error,
 ) error {
+	// Emit warning event for field export failure
+	if r.events != nil {
+		eventErr := r.events.EmitWarningEventForObject(
+			ctx, res,
+			ackevents.EventReasonFieldExportFailed,
+			ackevents.FormatMessage(ackevents.StandardMessages.FieldExportFailed, err.Error()),
+		)
+		if eventErr != nil {
+			ackrtlog.FromContext(ctx).Debug("failed to emit field export failed event", "error", eventErr)
+		}
+	}
+
 	var terminal ackerr.TerminalError
 	if errors.As(err, &terminal) {
 		r.patchTerminalCondition(ctx, res, err)
@@ -434,6 +459,17 @@ func (r *fieldExportReconciler) onSuccess(
 	ctx context.Context,
 	res *ackv1alpha1.FieldExport,
 ) error {
+	// Emit event for successful field export
+	if r.events != nil {
+		err := r.events.EmitNormalEventForObject(
+			ctx, res,
+			ackevents.EventReasonFieldExportCompleted,
+			ackevents.FormatMessage(ackevents.StandardMessages.FieldExportCompleted),
+		)
+		if err != nil {
+			ackrtlog.FromContext(ctx).Debug("failed to emit field export completed event", "error", err)
+		}
+	}
 	return nil
 }
 
